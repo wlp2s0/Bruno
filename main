@@ -1,0 +1,225 @@
+# Install Arch Linux with full encrypted btrfs subvolume inside luks
+# Hardware: BIOS system, Intel GPU, Nvidia Optimus, Toshiba SSD, Wifi
+# Please adjust for your needs.
+# filename: install-arch-linux-on-btrfs-subvolume-inside-luks.txt
+# The official guide: https://wiki.archlinux.org/index.php/Installation_Guide
+
+# Download the archiso image from https://www.archlinux.org/download/
+# Copy to a usb-drive
+dd bs=4M if=archlinux.iso of=/dev/sdx status=progress oflag=sync # on linux
+
+# Boot from the usb.
+
+# Set your keymap
+loadkeys es
+
+# Connect to wifi network ...
+wifi-menu
+
+# Create a primary partition - entire disk
+parted -s /dev/sda mklabel msdos
+parted -s /dev/sda mkpart primary 2048s 100%
+
+# Create luks container (luks1 for compatibility with grub)
+cryptsetup --type luks1 --cipher aes-xts-plain64 --hash sha512 \
+           --use-random --verify-passphrase luksFormat /dev/sda1
+
+# Create btrfs filesystem
+cryptsetup open /dev/sda1 archlinux
+mkfs -t btrfs --force -L archlinux /dev/mapper/archlinux
+
+# ... and subvolumes
+mount -t btrfs -o compress=lzo /dev/mapper/archlinux /mnt
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@snapshots
+
+# Unmount and remount with the corect partitions
+umount /mnt
+
+# Mount options
+o=defaults,x-mount.mkdir
+o_btrfs=$o,compress=lzo,ssd,noatime
+
+# Remount the partitions
+mount -o compress=lzo,subvol=@,$o_btrfs /dev/mapper/archlinux /mnt
+mount -o compress=lzo,subvol=@home,$o_btrfs /dev/mapper/archlinux /mnt/home
+mount -o compress=lzo,subvol=@snapshots,$o_btrfs /dev/mapper/archlinux /mnt/.snapshots
+
+# Install the system, wifi and some tools
+pacstrap /mnt base base-devel btrfs-progs snapper zsh mlocate htop \
+                net-tools wireless_tools wpa_supplicant dialog vim \
+                intel-ucode grub aria2 hping elinks bash-completion
+
+# Generate fstab
+genfstab -L -p /mnt >> /mnt/etc/fstab
+
+# Review the /mnt/etc/fstab
+LABEL=archlinux   /           btrfs       rw,noatime,compress=lzo,ssd,commit=120,subvol=@ 0 0
+LABEL=archlinux   /home       btrfs       rw,noatime,compress=lzo,ssd,commit=120,subvol=@home 0 0
+LABEL=archlinux   /.snapshots btrfs       rw,noatime,compress=lzo,ssd,commit=120,subvol=@snapshots 0 0
+# Swap in zram (adjust for your needs)
+# /dev/zram0        none    swap    defaults      0 0
+# /dev/zram1        none    swap    defaults      0 0
+
+# Enter the new system
+arch-chroot /mnt /bin/bash
+
+# Setup system clock
+ln -s /usr/share/zoneinfo/Europe/Madrid /etc/localtime
+hwclock --systohc --utc
+
+# Set the hostname
+echo arch > /etc/hostname
+
+# Generate and set default locale
+vim /etc/locale.gen
+# Uncomment en_US.UTF-8
+locale-gen
+echo LANG=en_US.utf8 >> /etc/locale.conf
+echo LANGUAGE=en_US >> /etc/locale.conf
+echo LC_ALL=C >> /etc/locale.conf
+
+# Set virtul console lang and font
+echo KEYMAP=es > /etc/vconsole.conf
+echo FONT=Lat2-Terminus16 >> /etc/vconsole.conf
+
+# Set password for root
+passwd
+
+# Create user
+useradd -m -G wheel angel
+passwd angel
+
+# Configure mkinitcpio
+vim /etc/mkinitcpio.conf
+
+# Early modules load
+MODULES=(i915)
+# Embed btrfs to initramfs
+BINARIES=(/usr/sbin/btrfs)
+# Add 'encrypt' to HOOKS before filesystems
+HOOKS="base udev autodetect modconf block encrypt filesystems keyboard fsck"
+
+# Regenerate initrd image
+mkinitcpio -p linux
+
+# Setup grub
+# Edit /etc/default/grub, add GRUB_ENABLE_CRYPTODISK=y and GRUB_DISABLE_SUBMENU=y
+GRUB_CMDLINE_LINUX="cryptdevice=/dev/sda1:archlinux:allow-discards"
+
+# Extra kernel options to add to GRUB_CMDLINE_LINUX (for old laptop 2011-2012)
+# https://forum.manjaro.org/t/howto-power-savings-setup-20180906/1445
+# ACPI
+acpi_osi=Linux acpi_osi='!Windows 2012' acpi=force acpi_enforce_resources=lax
+# i915
+i915.modeset=1 i915.fastboot=1 i915.enable_rc6=1 i915.enable_fbc=1 i915.lvds_downclock=1 i915.semaphores=1 
+# Varios power saving and performance settings
+net.ifnames=0 spectre_v2=off nopti nowatchdog vsyscall=emulate ath9k.ps_enable=1 pcie_aspm=force ipv6.disable=1
+# Audit
+audit=1 audit_backlog_limit=8192
+# Quite boot
+quiet loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3
+
+# My actual CMDLINE for ThinkPad T480s
+BOOT_IMAGE=/vmlinuz-linux-zen root=/dev/mapper/archlinux rw rootflags=subvol=root \
+cryptdevice=/dev/nvme0n1p4:archlinux:allow-discards rd.luks.options=discards rw \
+acpi_osi=! "acpi_osi=Windows 2015" acpi=force acpi_enforce_resources=lax drm.vblankoffdelay=1 acpi_backlight=native \
+i915.modeset=1 i915.fastboot=1 i915.enable_psr=1 i915.enable_guc=3 i915.enable_fbc=1 \
+net.ifnames=0 spectre_v2=off nopti nowatchdog vsyscall=emulate audit=1 audit_backlog_limit=8192 \
+fan_control=1 psmouse.elantech_smbus=0 ec_sys.write_support=1 \
+quiet loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3
+
+# Install grub and create configuration
+grub-install --target=i386-pc /dev/sda
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# Exit new system and go into the cd shell
+exit
+
+# Unmount all partitions
+umount -R /mnt
+
+# Reboot into the new system, don't forget to remove the usb
+reboot
+
+# Create keyfile for paswordless login
+dd bs=512 count=4 if=/dev/urandom of=/crypto_keyfile.bin
+cryptsetup luksAddKey /dev/sda1 /crypto_keyfile.bin
+and add to /etc/mkinitcpio.conf
+FILES=(/crypto_keyfile.bin)
+# run:
+mkinitcpio -p linux
+# Reboot again, you’ll only need to enter your password once.
+reboot
+
+# Secure keyfile and /boot
+chmod 000 /crypto_keyfile.bin  # actually, even root doesn't need to access this
+chmod -R g-rwx,o-rwx /boot     # just to be safe
+
+# Optional: Install Aur helper, X, WM, Software and Configure the System
+
+# Install AUR helper - yaourt
+wget https://aur.archlinux.org/cgit/aur.git/snapshot/package-query.tar.gz
+wget https://aur.archlinux.org/cgit/aur.git/snapshot/yaourt.tar.gz
+# Install as regular user (extract, run makepkg, pacman -U)
+
+::TODO:: Update the installed packages. Finish configuration.
+
+# Install Zen Kernel , X, DE, some basic tools
+pacman -S linux-zen linux-zen-headers irqbalance cpupower x86_energy_perf_policy \
+pacman -S xorg-server xf86-video-intel xf86-video-nouveau xf86-input-synaptics \
+            xorg-xbacklight xorg-xinit xterm rxvt-unicode compton openbox tint2 \
+            conky  dmenu  volumeicon slock feh nitrogen scrot xarchiver p7zip \
+            unzip unrar rfkill ttf-liberation ttf-droid ttf-hack terminus-font \
+            powertop wget whois ethtool archey3 gvim
+
+# Look and feel
+pacman -S gtk-engine-murrine numix-themes faenza-icon-theme
+
+# Office programs
+
+# Some graphics applications
+pacman -S gimp inkscape dia mtpaint gpicview graphicsmagick cups-pdf simple-scan
+
+# Utilities
+pacman -S stardict-lite aspell-en aspell-es hunspell-en hunspell-es \
+            mythes-en mythes-es hyphen-en hyphen-es perl-file-mimeinfo \
+            keepassx cherrytree zim gprename galculator gsimplecal
+
+# System tools
+pacman -S bleachbit nethogs gparted dosfstools ntfs-3g grsync gsmartcontrol \
+            lxterminal lxappearance lxtask obconf geany scite sshfs gpart \
+            nmap macchanger ghex yajl pssh wpa_actiond ifplugd gvfs dnsutils\
+            ifplugd gvfs dnsutils grsync xdotool alsa-plugins alsa-utils lsof
+
+# Multimedia
+pacman -S avidemux-gtk audacity guvcview gtk-recordmydesktop pragha winff \
+            handbrake mpv easytag smplayer deadbeef gst-plugins-bad \
+            gst-plugins-ugly gst-libav openshot libquicktime \
+            frei0r-plugins flashplayer youtube-dl rtmpdump atomicparsley
+
+# Network
+pacman -S pidgin pidgin-otr purple-skypeweb linphone xchat transmission-gtk \
+            uget filezilla claws-mail opera wireshark-gtk openvpn pptpclient \
+            xl2tpd torsocks
+
+# Virtualisation
+pacman -S virtualbox virtualbox-host-dkms wine winetricks
+
+# Nvidia Optimus
+pacman -S --needed bumblebee primus bbswitch-dkms libva-intel-driver \
+            libva-mesa-driver  libva-vdpau-driver mesa-vdpau nvidia-dkms \
+            nvidia-utils nvidia-settings mesa-demos
+
+# Development
+pacman -S nginx-mainline php php-apcu php-fpm php-gd php-mcrypt php-snmp \
+            php-tidy composer apache nghttp2 lighttpd openvpn \
+            mariadb xdebug nodejs ruby npm colordiff git jdk8-openjdk
+
+# Security
+pacman -S rkhunter clamav gufw
+
+yaourt -S   ananicy-git cdw csslint dbeaver freeplane freshplayerplugin  gtk-theme-numix-sx icecat-bin \
+            lostfiles nodejs-jshint pepper-flash playerctl profile-cleaner purple-facebook purple-hangouts-hg \
+            virtualbox-ext-oracle clipit spacefm-git scite sublime-text-dev megasync thermald genymotion
