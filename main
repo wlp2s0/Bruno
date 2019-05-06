@@ -1,7 +1,6 @@
 # Install Arch Linux with full encrypted btrfs subvolume inside luks
-# Hardware: BIOS system, Intel GPU, Nvidia Optimus, Toshiba SSD, Wifi
+# Hardware: BIOS system, AORUS GTX 1080, Toshiba KXG50ZNV256G
 # Please adjust for your needs.
-# filename: install-arch-linux-on-btrfs-subvolume-inside-luks.txt
 # The official guide: https://wiki.archlinux.org/index.php/Installation_Guide
 
 # Download the archiso image from https://www.archlinux.org/download/
